@@ -1,0 +1,159 @@
+#cloud-config
+
+hostname: hlachkarS
+timezone: Europe/Madrid
+locale: en_US.UTF-8
+
+manage_etc_hosts: true
+
+users:
+  - name: hlachkar
+    groups: [docker, sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDIwj9XjA1VmnQ5U85cjxPSx1LqO8X/pcd7lEixbDSXBsabb0jNEo+GH0yaevmw9GpoYpYb5BNt44KkiXIErI9ZResNFur+yrtaTaVluKR82qoZ+PsDGYxXtTwMcz74jBRhgAlvWI6ucMxZI/ce/os1xOE/oYlkBqelvm8IxFuFSKrMaPU4C9GXeJ1+r6hfmggS57eWdt1tBZ5mHyZl8j1t0wlVTdklun0qeO3vmSRMIszGoamkxImyvLmBO//WUXQjoTKwE5w9px7jY9UmePmqoPqHrpczkSbK9mroBXnpnO+UQBTjuZg1MR6nXDCWgQDpSLPBLJtIyZhm2CTLEgo06497SxzZIKKC6crp0q2/gw88RZGmts2IfOAucHC5bCmfWN3wEttFVhKP8Sw0yK7kJxHZMRkHjgLG2AO2x0eGJPS6PIYU1ys3DZf8aBOdjO08ys6uMs+BdQj+DgJeJsebUhgOC2ODSPfaqkbxN0hzbkvLpMGGSZDesvLlF9VTw5tfAuphyiSqWFzG9YXvKfec5569Bp/Bv0jtFy79iJshXTCoiu6uwbwdnpVbs9bn+MnzGtSE40DwUXoa2SFIiv9yIOdbdTVIfci0x6PbLT8+NnhXQBrnDQBhfsOvm4l6fS9PWg8ddBFNx9HGIGdmcxMnzFeO5kbN2r6Di4Vk8nnCCw== hlachkar@c3r6p8.1337.ma
+
+write_files:
+  - path: /opt/argocd-overlay/kustomization.yaml
+    permissions: '0644'
+    content: |
+      apiVersion: kustomize.config.k8s.io/v1beta1
+      kind: Kustomization
+      resources:
+      - ./install.yaml
+      
+      patches:
+      - path: ./patch-argocd-dep.yml
+      - path: ./patch-argocd-cm.yml
+  - path: /opt/argocd-overlay/patch-argocd-dep.yml
+    permissions: '0644'
+    content: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+       name: argocd-server
+      spec:
+       template:
+         spec:
+           containers:
+           - args:
+             - /usr/local/bin/argocd-server
+             - --insecure
+             - --basehref
+             - /argocd
+             - --rootpath
+             - /argocd
+             name: argocd-server
+             env:
+             - name: ARGOCD_MAX_CONCURRENT_LOGIN_REQUESTS_COUNT
+               value: "0"
+
+  - path: /opt/argocd-overlay/patch-argocd-cm.yml
+    permissions: '0644'
+    content: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: argocd-cm
+      data:
+        resource.exclusions: ""
+        timeout.reconciliation: 60s
+
+  - path: /opt/argocd-app/project.yaml
+    permissions: '0644'
+    content: |
+      apiVersion: argoproj.io/v1alpha1
+      kind: AppProject
+      metadata:
+        name: development
+        namespace: argocd
+      spec:
+        description: Project for dev applications
+        sourceRepos:
+          - https://github.com/buflallo/hlachkar.git
+        destinations:
+          - namespace: dev
+            server: https://kubernetes.default.svc
+        clusterResourceWhitelist:
+          - group: '*'
+            kind: '*'
+
+  - path: /opt/argocd-app/application.yaml
+    permissions: '0644'
+    content: |
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: flask-application
+        namespace: argocd
+        finalizers:
+          - resources-finalizer.argocd.argoproj.io
+        labels:
+          name: flask-app
+      spec:
+        project: development
+      
+        source:
+          repoURL: https://github.com/buflallo/hlachkar.git  # Can point to either a Helm chart repo or a git repo.
+          targetRevision: main  # For Helm, this refers to the chart version.
+          path: infra  # This has no meaning for Helm charts pulled directly from a Helm repo instead of git.
+      
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: dev
+        
+        syncPolicy:
+          automated: # automated sync by default retries failed attempts 5 times with following delays between attempts ( 5s, 10s, 20s, 40s, 80s ); retry controlled using `retry` field.
+            prune: true # Specifies if resources should be pruned during auto-syncing ( false by default ).
+            selfHeal: true # Specifies if partial app sync should be executed when resources are changed only in target Kubernetes cluster and no git change detected ( false by default ).
+          syncOptions:     # Sync options which modifies sync behavior
+          - ApplyOutOfSyncOnly=true # Only sync out-of-sync resources, rather than applying every object in the application
+          retry:
+            limit: 3 # number of failed sync attempt retries; unlimited number of attempts if less than 0
+            backoff:
+              duration: 5s # the amount to back off. Default unit is seconds, but could also be a duration (e.g. "2m", "1h")
+              factor: 3 # a factor to multiply the base duration after each failed retry
+              maxDuration: 2m # the maximum amount of time allowed for the backoff strategy
+  - path: /etc/profile.d/00-aliases.sh
+    permissions: '0644'
+    content: |
+      alias k='kubectl'
+      #!/bin/bash
+      if [ ! -f ~/.cloud-init-log-displayed ] && [ -f /var/log/cloud-init-output.log ]; then
+        echo "Streaming cloud-init output log (press Ctrl+C to stop)..."
+        # Stream the last 50 lines and follow new entries for up to 30 seconds
+        sudo timeout 120s tail -n 50 -f /var/log/cloud-init-output.log || true
+        # Create a flag file to prevent showing the log again
+        touch ~/.cloud-init-log-displayed
+      fi
+
+runcmd:
+  - apt update -y
+  - curl -fsSL https://get.docker.com | sh
+
+  # Install kubectl (latest stable)
+  - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl.sha256"
+  - echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+  - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+  - rm kubectl kubectl.sha256
+
+  # Install k3d
+  - curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+  # create k3d cluster
+  - k3d cluster create -p "8081:80@loadbalancer" -p "8888:8888@loadbalancer" --agents 1
+  # install argocd, allowing no tls insecure access
+  - curl -kLs -o /opt/argocd-overlay/install.yaml https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+  - kubectl create namespace argocd
+  - kubectl apply -k /opt/argocd-overlay -n argocd --wait=true
+  - while ! kubectl get secret argocd-initial-admin-secret -n argocd >/dev/null 2>&1; do echo "Waiting for secret/my-secret..."; sleep 1; done; echo "Secret is available!"
+  - kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}" | base64 -d > /home/hlachkar/password && echo "" >> password
+  - while ! kubectl get endpoints argocd-repo-server -n argocd | grep -q '[0-9]'; do echo "Waiting for argocd-repo-server..."; sleep 2; done;
+  - kubectl create ingress argocd --class=traefik --rule=/argocd*=argocd-server:80 --annotation ingress.kubernetes.io/ssl-redirect=false -n argocd 
+  - kubectl create ns dev
+  - kubectl apply -f /opt/argocd-app/project.yaml -n argocd --wait=true
+  - kubectl apply -f /opt/argocd-app/application.yaml -n argocd --wait=true
+  - mkdir /home/hlachkar/.kube
+  - k3d kubeconfig get k3s-default > /home/hlachkar/.kube/config
